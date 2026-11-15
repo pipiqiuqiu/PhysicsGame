@@ -11,6 +11,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
 {
     public bool IsAirborne => airborne;
     public bool IsStandingOnRear => standingOnRear;
+    public bool IsSupportedByRear => !airborne && supportedByRear;
     public int HeightCommand => heightCommand;
     public float JumpStartClearance => jumpStartClearance;
     public float ForwardTangentSign => forwardSign;
@@ -33,17 +34,11 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     [Min(0f)] [SerializeField] private float hoverSpring = 25f;
     [Min(0f)] [SerializeField] private float hoverDamping = 10f;
 
-    [Header("Jump and orientation")]
+    [Header("Jump")]
     [Min(0f)] [SerializeField] private float jumpImpulse = 8f;
     [FormerlySerializedAs("bothHandsRearJumpBonus")]
     [Min(0f)] [SerializeField] private float rearHandJumpBonus = 6f;
-    [Min(0f)] [SerializeField] private float orientationSpring = 35f;
-    [Min(0f)] [SerializeField] private float orientationDamping = 8f;
-
-    [Header("Jump rotation")]
-    [Min(0f)] [SerializeField] private float jumpSpinImpulse = 4f;
-    [Min(0f)] [SerializeField] private float airSpinAcceleration = 18f;
-    [Min(0f)] [SerializeField] private float maxAirSpinSpeed = 6f;
+    [Min(0f)] [SerializeField] private float rearTravelImpulse = 20f;
 
     [Header("Hand steps")]
     [Min(0.1f)] [SerializeField] private float stepCyclesPerSecond = 1.35f;
@@ -95,12 +90,13 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     private float airTime;
     private int heightCommand;
     private float jumpStartClearance;
-    private float jumpSpinInput;
-    private float originalMaxAngularVelocity;
+    private float jumpTravelInput;
     private bool jumpRequested;
+    private bool jumpWithRearOnTopRequested;
     private bool airborne;
-    private bool spinJumpInProgress;
+    private bool rearTravelJumpInProgress;
     private bool standingOnRear;
+    private bool supportedByRear;
 
     private void Awake()
     {
@@ -112,7 +108,6 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         }
 
         frontBody = GetComponent<Rigidbody>();
-        originalMaxAngularVelocity = frontBody.maxAngularVelocity;
         BoxCollider frontCollider = GetComponent<BoxCollider>();
         rearController = FindAnyObjectByType<BodyBehindFollower>();
         rearCollider = rearController != null ? rearController.GetComponent<Collider>() : null;
@@ -121,6 +116,10 @@ public sealed class FrontBodyPhysics : MonoBehaviour
             : 1f;
         frontBody.isKinematic = false;
         frontBody.useGravity = false;
+        Vector3 frontPosition = frontBody.position;
+        frontPosition.x = 0f;
+        frontBody.position = frontPosition;
+        frontBody.constraints |= RigidbodyConstraints.FreezePositionX;
         frontBody.interpolation = RigidbodyInterpolation.Interpolate;
         frontBody.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
 
@@ -162,11 +161,11 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         heightCommand = keyboard == null ? 0 :
             (keyboard.wKey.isPressed ? 1 : 0) -
             (keyboard.sKey.isPressed ? 1 : 0);
-        if (keyboard != null && keyboard.spaceKey.wasPressedThisFrame &&
-            (rearController == null || !rearController.CanJumpFromFront))
+        if (keyboard != null && keyboard.spaceKey.wasPressedThisFrame)
         {
             jumpRequested = true;
-            jumpSpinInput = movementInput;
+            jumpTravelInput = movementInput;
+            jumpWithRearOnTopRequested = rearController != null && rearController.CanJumpFromFront;
         }
     }
 
@@ -191,36 +190,51 @@ public sealed class FrontBodyPhysics : MonoBehaviour
             supportGap >= frontHalfHeight - 0.25f &&
             supportGap <= frontHalfHeight + 0.35f &&
             relativeSpeed <= 0.5f;
+        bool handOnRear = rearCollider != null &&
+            ((left.plantedSupport == rearCollider && left.sensor.IsOnPlatform) ||
+             (right.plantedSupport == rearCollider && right.sensor.IsOnPlatform));
+        supportedByRear = physicallyOnRear || handOnRear || standingOnRear;
         bool onRear = heightCommand == 0 && physicallyOnRear;
         Vector3 tangent = Tangent(normal);
         float tangentialSpeed = Vector3.Dot(frontBody.linearVelocity, tangent);
 
-        frontBody.AddForce(tangent * ((movementInput * moveSpeed - tangentialSpeed) * driveResponse),
-                           ForceMode.Acceleration);
-
         float heightMultiplier = heightCommand > 0 ? raisedClearanceMultiplier :
                                  heightCommand < 0 ? loweredClearanceMultiplier : 1f;
         float targetClearance = baseClearance * heightMultiplier;
-        if (jumpRequested && !airborne &&
-            (left.sensor.IsGrounded || right.sensor.IsGrounded || physicallyOnRear))
+        bool pulledByRear = rearController != null && rearController.IsPullingFront;
+        if (pulledByRear)
+        {
+            if (!airborne)
+            {
+                airborne = true;
+                standingOnRear = false;
+                airTime = 0f;
+            }
+        }
+        // The hands can both leave the surface during a step even while the
+        // body's hover controller is supporting it. Use the airborne state
+        // instead of transient hand contacts to decide whether it can jump.
+        if (jumpRequested && !airborne)
         {
             // Either planted hand touching the rear body adds the bonus impulse.
-            bool handOnRear = rearCollider != null &&
-                ((left.plantedSupport == rearCollider && left.sensor.IsOnPlatform) ||
-                 (right.plantedSupport == rearCollider && right.sensor.IsOnPlatform));
             float impulse = jumpImpulse + (handOnRear ? rearHandJumpBonus : 0f);
             frontBody.AddForce(normal * impulse, ForceMode.Impulse);
-            if (jumpSpinInput != 0f)
-                frontBody.AddTorque(gravityField.Axis * (jumpSpinInput * jumpSpinImpulse),
-                                    ForceMode.Impulse);
+            if ((physicallyOnRear || handOnRear) && jumpTravelInput != 0f)
+            {
+                frontBody.AddForce(tangent * (jumpTravelInput * rearTravelImpulse),
+                                   ForceMode.Impulse);
+                rearTravelJumpInProgress = true;
+            }
             airborne = true;
-            spinJumpInProgress = true;
             standingOnRear = false;
             airTime = 0f;
             jumpStartClearance = clearance;
+            if (!supportedByRear && !jumpWithRearOnTopRequested)
+                rearController?.ScheduleGroundJumpAfterFront();
         }
         jumpRequested = false;
-        jumpSpinInput = 0f;
+        jumpWithRearOnTopRequested = false;
+        jumpTravelInput = 0f;
 
         if (airborne)
         {
@@ -252,7 +266,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
             }
         }
 
-        if (!airborne && !standingOnRear)
+        if (!airborne && !standingOnRear && !pulledByRear)
         {
             // The gravity field pulls inward; the hover force balances it and
             // acts like a spring that maintains the chosen radial clearance.
@@ -263,13 +277,11 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         }
 
         if (!airborne)
-        {
-            spinJumpInProgress = false;
-            frontBody.maxAngularVelocity = originalMaxAngularVelocity;
-        }
-        if (spinJumpInProgress)
-            ApplyAirSpin(movementInput);
-        else
+            rearTravelJumpInProgress = false;
+        if (!rearTravelJumpInProgress && !pulledByRear)
+            frontBody.AddForce(tangent * ((movementInput * moveSpeed - tangentialSpeed) * driveResponse),
+                               ForceMode.Acceleration);
+        if (!pulledByRear)
             AlignWithSurface(normal, tangent);
 
         if (airborne)
@@ -286,32 +298,8 @@ public sealed class FrontBodyPhysics : MonoBehaviour
 
     private void AlignWithSurface(Vector3 normal, Vector3 tangent)
     {
-        Quaternion targetRotation = Quaternion.LookRotation(tangent, normal);
-        Quaternion error = targetRotation * Quaternion.Inverse(frontBody.rotation);
-        error.ToAngleAxis(out float angle, out Vector3 axis);
-        if (angle > 180f)
-            angle -= 360f;
-
-        Vector3 torque = axis * (angle * Mathf.Deg2Rad * orientationSpring) -
-                         frontBody.angularVelocity * orientationDamping;
-        frontBody.AddTorque(torque, ForceMode.Acceleration);
-    }
-
-    private void ApplyAirSpin(float input)
-    {
-        frontBody.maxAngularVelocity = Mathf.Max(originalMaxAngularVelocity, maxAirSpinSpeed);
-        if (input == 0f || maxAirSpinSpeed <= 0f)
-            return;
-
-        Vector3 axis = gravityField.Axis;
-        float remainingSpeed = maxAirSpinSpeed -
-                               Vector3.Dot(frontBody.angularVelocity, axis) * input;
-        if (remainingSpeed > 0f)
-        {
-            float acceleration = Mathf.Min(airSpinAcceleration,
-                                           remainingSpeed / Time.fixedDeltaTime);
-            frontBody.AddTorque(axis * (input * acceleration), ForceMode.Acceleration);
-        }
+        frontBody.angularVelocity = Vector3.zero;
+        frontBody.MoveRotation(Quaternion.LookRotation(tangent, normal));
     }
 
     private Vector3 Tangent(Vector3 normal)

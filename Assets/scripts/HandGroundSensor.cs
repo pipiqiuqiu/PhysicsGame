@@ -8,10 +8,13 @@ public sealed class HandGroundSensor : MonoBehaviour
     private bool touchingGround;
     private bool touchingPlatform;
     private float lastContactTime = float.NegativeInfinity;
+    private float lastGroundContactTime = float.NegativeInfinity;
     private float lastPlatformContactTime = float.NegativeInfinity;
 
     public bool IsGrounded => (touchingGround || touchingPlatform) &&
                               Time.fixedTime - lastContactTime <= Time.fixedDeltaTime * 1.5f;
+    public bool IsOnGround => touchingGround &&
+                              Time.fixedTime - lastGroundContactTime <= Time.fixedDeltaTime * 1.5f;
     public bool IsOnPlatform => touchingPlatform &&
                                 Time.fixedTime - lastPlatformContactTime <= Time.fixedDeltaTime * 1.5f;
 
@@ -22,6 +25,7 @@ public sealed class HandGroundSensor : MonoBehaviour
         touchingGround = false;
         touchingPlatform = false;
         lastContactTime = float.NegativeInfinity;
+        lastGroundContactTime = float.NegativeInfinity;
         lastPlatformContactTime = float.NegativeInfinity;
     }
 
@@ -38,7 +42,10 @@ public sealed class HandGroundSensor : MonoBehaviour
     private void OnTriggerExit(Collider other)
     {
         if (other == ground)
+        {
             touchingGround = false;
+            lastGroundContactTime = float.NegativeInfinity;
+        }
         if (other == platform)
         {
             touchingPlatform = false;
@@ -51,7 +58,10 @@ public sealed class HandGroundSensor : MonoBehaviour
     private void RecordContact(Collider other)
     {
         if (other == ground)
+        {
             touchingGround = true;
+            lastGroundContactTime = Time.fixedTime;
+        }
         else if (other == platform)
         {
             touchingPlatform = true;
