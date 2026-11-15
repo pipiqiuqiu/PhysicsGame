@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>Reports contact between one limb trigger and either walkable surface.</summary>
@@ -5,15 +6,15 @@ public sealed class HandGroundSensor : MonoBehaviour
 {
     private Collider ground;
     private Collider platform;
-    private bool touchingGround;
+    private readonly HashSet<Collider> touchingFloors = new HashSet<Collider>();
     private bool touchingPlatform;
     private float lastContactTime = float.NegativeInfinity;
     private float lastGroundContactTime = float.NegativeInfinity;
     private float lastPlatformContactTime = float.NegativeInfinity;
 
-    public bool IsGrounded => (touchingGround || touchingPlatform) &&
+    public bool IsGrounded => (touchingFloors.Count > 0 || touchingPlatform) &&
                               Time.fixedTime - lastContactTime <= Time.fixedDeltaTime * 1.5f;
-    public bool IsOnGround => touchingGround &&
+    public bool IsOnGround => touchingFloors.Count > 0 &&
                               Time.fixedTime - lastGroundContactTime <= Time.fixedDeltaTime * 1.5f;
     public bool IsOnPlatform => touchingPlatform &&
                                 Time.fixedTime - lastPlatformContactTime <= Time.fixedDeltaTime * 1.5f;
@@ -22,7 +23,7 @@ public sealed class HandGroundSensor : MonoBehaviour
     {
         ground = groundCollider;
         platform = platformCollider;
-        touchingGround = false;
+        touchingFloors.Clear();
         touchingPlatform = false;
         lastContactTime = float.NegativeInfinity;
         lastGroundContactTime = float.NegativeInfinity;
@@ -41,25 +42,26 @@ public sealed class HandGroundSensor : MonoBehaviour
 
     private void OnTriggerExit(Collider other)
     {
-        if (other == ground)
+        if (other == ground || CylinderGravityField.IsFloor(other))
         {
-            touchingGround = false;
-            lastGroundContactTime = float.NegativeInfinity;
+            touchingFloors.Remove(other);
+            if (touchingFloors.Count == 0)
+                lastGroundContactTime = float.NegativeInfinity;
         }
         if (other == platform)
         {
             touchingPlatform = false;
             lastPlatformContactTime = float.NegativeInfinity;
         }
-        if (!touchingGround && !touchingPlatform)
+        if (touchingFloors.Count == 0 && !touchingPlatform)
             lastContactTime = float.NegativeInfinity;
     }
 
     private void RecordContact(Collider other)
     {
-        if (other == ground)
+        if (other == ground || CylinderGravityField.IsFloor(other))
         {
-            touchingGround = true;
+            touchingFloors.Add(other);
             lastGroundContactTime = Time.fixedTime;
         }
         else if (other == platform)

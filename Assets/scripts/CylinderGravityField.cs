@@ -7,6 +7,7 @@ public sealed class CylinderGravityField : MonoBehaviour
 
     private Transform cylinder;
     private Collider groundCollider;
+    private Collider[] floorColliders;
     private Vector3 localCenter;
     private float localRadius;
     private Rigidbody[] bodies;
@@ -51,6 +52,7 @@ public sealed class CylinderGravityField : MonoBehaviour
             groundCollider = meshCollider;
         }
 
+        RefreshFloorColliders();
         RefreshBodies();
         return true;
     }
@@ -63,12 +65,13 @@ public sealed class CylinderGravityField : MonoBehaviour
         if (Time.fixedTime >= nextRefreshTime)
         {
             RefreshBodies();
+            RefreshFloorColliders();
             nextRefreshTime = Time.fixedTime + 0.5f;
         }
 
         foreach (Rigidbody body in bodies)
         {
-            if (body == null || body.isKinematic)
+            if (body == null || body.isKinematic || HasFloorTag(body.transform))
                 continue;
 
             body.useGravity = false;
@@ -82,6 +85,75 @@ public sealed class CylinderGravityField : MonoBehaviour
         bodies = FindObjectsByType<Rigidbody>();
     }
 
+    private void RefreshFloorColliders()
+    {
+        EnsureTaggedFloorColliders();
+        Collider[] allColliders = FindObjectsByType<Collider>();
+        int count = 0;
+        foreach (Collider candidate in allColliders)
+        {
+            if (candidate != null && candidate.enabled && !candidate.isTrigger &&
+                (candidate == groundCollider || IsFloor(candidate)))
+                count++;
+        }
+
+        floorColliders = new Collider[count];
+        int index = 0;
+        foreach (Collider candidate in allColliders)
+        {
+            if (candidate != null && candidate.enabled && !candidate.isTrigger &&
+                (candidate == groundCollider || IsFloor(candidate)))
+                floorColliders[index++] = candidate;
+        }
+    }
+
+    private void EnsureTaggedFloorColliders()
+    {
+        foreach (Transform root in FindObjectsByType<Transform>())
+        {
+            if (!root.CompareTag("floor"))
+                continue;
+
+            bool hasSolidCollider = false;
+            foreach (Collider existing in root.GetComponentsInChildren<Collider>())
+            {
+                if (existing.enabled && !existing.isTrigger)
+                {
+                    hasSolidCollider = true;
+                    break;
+                }
+            }
+            if (hasSolidCollider)
+                continue;
+
+            foreach (MeshFilter filter in root.GetComponentsInChildren<MeshFilter>())
+            {
+                if (filter.sharedMesh == null)
+                    continue;
+                MeshCollider collider = filter.gameObject.AddComponent<MeshCollider>();
+                collider.sharedMesh = filter.sharedMesh;
+            }
+        }
+    }
+
+    public static bool IsFloor(Collider candidate)
+    {
+        if (candidate == null || candidate.isTrigger)
+            return false;
+
+        return HasFloorTag(candidate.transform);
+    }
+
+    private static bool HasFloorTag(Transform objectTransform)
+    {
+        for (Transform current = objectTransform; current != null; current = current.parent)
+        {
+            if (current.CompareTag("floor"))
+                return true;
+        }
+        return false;
+    }
+
     public Vector3 OutwardNormal(Vector3 position)
     {
         Vector3 radial = Vector3.ProjectOnPlane(position - Center, Axis);
@@ -90,20 +162,7 @@ public sealed class CylinderGravityField : MonoBehaviour
 
     public bool SampleSurface(Vector3 position, out Vector3 point, out Vector3 normal)
     {
-        normal = OutwardNormal(position);
-        Vector3 axis = Axis;
-        Vector3 axisPoint = Center + axis * Vector3.Dot(position - Center, axis);
-        float worldRadius = cylinder.TransformVector(Vector3.up * localRadius).magnitude;
-        Ray ray = new Ray(axisPoint + normal * (worldRadius + 30f), -normal);
-
-        if (groundCollider.Raycast(ray, out RaycastHit hit, 60f))
-        {
-            point = hit.point;
-            return true;
-        }
-
-        point = axisPoint + normal * worldRadius;
-        return false;
+        return SampleFloorSurface(position, out point, out normal, out _);
     }
 
     /// <summary>Finds the outermost walkable surface beneath a point on the cylinder.</summary>
@@ -112,20 +171,15 @@ public sealed class CylinderGravityField : MonoBehaviour
                                      out Collider support,
                                      float maxPlatformDistance = float.PositiveInfinity)
     {
-        normal = OutwardNormal(position);
-        Vector3 axisPoint = Center + Axis * Vector3.Dot(position - Center, Axis);
-        float worldRadius = cylinder.TransformVector(Vector3.up * localRadius).magnitude;
-        Ray ray = new Ray(axisPoint + normal * (worldRadius + 30f), -normal);
-
-        bool foundGround = groundCollider.Raycast(ray, out RaycastHit groundHit, 60f);
-        point = foundGround ? groundHit.point : axisPoint + normal * worldRadius;
-        support = groundCollider;
+        bool foundGround = SampleFloorSurface(position, out point, out normal, out support);
+        Vector3 outward = OutwardNormal(position);
+        Ray ray = new Ray(position + outward * 30f, -outward);
 
         if (platform != null && platform.enabled &&
             platform.Raycast(ray, out RaycastHit platformHit, 60f) &&
-            Vector3.Dot(platformHit.normal, normal) > 0.5f &&
-            Mathf.Abs(Vector3.Dot(platformHit.point - position, normal)) <= maxPlatformDistance &&
-            Vector3.Dot(platformHit.point - point, normal) > 0.05f)
+            Vector3.Dot(platformHit.normal, outward) > 0.5f &&
+            Mathf.Abs(Vector3.Dot(platformHit.point - position, outward)) <= maxPlatformDistance &&
+            Vector3.Dot(platformHit.point - point, outward) > 0.05f)
         {
             point = platformHit.point;
             normal = platformHit.normal;
@@ -134,5 +188,50 @@ public sealed class CylinderGravityField : MonoBehaviour
         }
 
         return foundGround;
+    }
+
+    private bool SampleFloorSurface(Vector3 position, out Vector3 point,
+                                    out Vector3 normal, out Collider support)
+    {
+        Vector3 outward = OutwardNormal(position);
+        Ray ray = new Ray(position + outward * 30f, -outward);
+        float bestHeight = float.NegativeInfinity;
+        bool found = false;
+        point = Vector3.zero;
+        normal = outward;
+        support = groundCollider;
+
+        if (floorColliders != null)
+        {
+            foreach (Collider floor in floorColliders)
+            {
+                if (floor == null || !floor.enabled || floor.isTrigger ||
+                    !floor.Raycast(ray, out RaycastHit hit, 60f))
+                    continue;
+
+                float heightFromBody = Vector3.Dot(hit.point - position, outward);
+                if (heightFromBody > 1f)
+                    continue;
+
+                float height = Vector3.Dot(hit.point - Center, outward);
+                if (!found || height > bestHeight)
+                {
+                    found = true;
+                    bestHeight = height;
+                    point = hit.point;
+                    normal = Vector3.Dot(hit.normal, outward) >= 0.35f
+                        ? hit.normal : outward;
+                    support = floor;
+                }
+            }
+        }
+
+        if (!found)
+        {
+            Vector3 axisPoint = Center + Axis * Vector3.Dot(position - Center, Axis);
+            float worldRadius = cylinder.TransformVector(Vector3.up * localRadius).magnitude;
+            point = axisPoint + outward * worldRadius;
+        }
+        return found;
     }
 }

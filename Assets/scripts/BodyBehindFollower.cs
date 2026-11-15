@@ -62,6 +62,11 @@ public sealed class BodyBehindFollower : MonoBehaviour
     [Min(0f)] [SerializeField] private float footOnFrontJumpImpulse = 8f;
     [Min(0f)] [SerializeField] private float footOnFrontTravelImpulse = 4f;
 
+    [Header("Stacked jump rotation")]
+    [Min(0f)] [SerializeField] private float jumpSpinImpulse = 5f;
+    [Min(0f)] [SerializeField] private float airSpinAcceleration = 5f;
+    [Min(0f)] [SerializeField] private float maxAirSpinSpeed = 6f;
+
     [Header("Feet")]
     [SerializeField] private Transform foot3;
     [SerializeField] private Transform foot4;
@@ -69,6 +74,7 @@ public sealed class BodyBehindFollower : MonoBehaviour
     [Min(0f)] [SerializeField] private float liftHeight = 0.65f;
     [Min(0f)] [SerializeField] private float stepLead = 0.35f;
     [Min(0f)] [SerializeField] private float contactInset = 0.06f;
+    [Min(0f)] [SerializeField] private float footGroundSnapDistance = 3f;
     [Min(0.1f)] [SerializeField] private float strideSpeed = 2.2f;
 
     private sealed class FootState
@@ -115,12 +121,14 @@ public sealed class BodyBehindFollower : MonoBehaviour
     private float horizontalInput;
     private float jumpDirectionInput;
     private float groundJumpReadyTime;
+    private float originalMaxAngularVelocity;
     private bool jumpRequested;
     private bool groundJumpPending;
     private bool jumpFromFrontRequested;
     private bool airborne;
     private bool pauseFollowDuringJump;
     private bool standingOnFront;
+    private bool stackedJumpSpinInProgress;
     private bool attractionActive;
     private bool pullFront;
 
@@ -135,6 +143,7 @@ public sealed class BodyBehindFollower : MonoBehaviour
         }
 
         rearBody = GetComponent<Rigidbody>();
+        originalMaxAngularVelocity = rearBody.maxAngularVelocity;
         frontCollider = frontBody.GetComponent<Collider>();
         rearCollider = GetComponent<Collider>();
         if (rearCollider is BoxCollider rearBox)
@@ -261,6 +270,8 @@ public sealed class BodyBehindFollower : MonoBehaviour
 
         if (jumpRequested && !airborne)
         {
+            bool spinningFromFront = jumpFromFrontRequested &&
+                                     !FootOnGround(left) && !FootOnGround(right);
             float impulse = jumpFromFrontRequested ? footOnFrontJumpImpulse : footOnGroundJumpImpulse;
             rearBody.AddForce(rearNormal * impulse, ForceMode.Impulse);
             if (jumpFromFrontRequested && jumpDirectionInput != 0f)
@@ -269,7 +280,11 @@ public sealed class BodyBehindFollower : MonoBehaviour
                 rearBody.AddForce(travelDirection *
                                   (jumpDirectionInput * footOnFrontTravelImpulse),
                                   ForceMode.Impulse);
+                if (spinningFromFront)
+                    rearBody.AddTorque(axis * (jumpDirectionInput * jumpSpinImpulse),
+                                       ForceMode.Impulse);
             }
+            stackedJumpSpinInProgress = spinningFromFront;
             airborne = true;
             pauseFollowDuringJump = jumpFromFrontRequested;
             standingOnFront = false;
@@ -357,8 +372,12 @@ public sealed class BodyBehindFollower : MonoBehaviour
         if (!airborne)
         {
             pauseFollowDuringJump = false;
+            stackedJumpSpinInProgress = false;
+            rearBody.maxAngularVelocity = originalMaxAngularVelocity;
         }
-        if (!attractionActive || pullFront)
+        if (stackedJumpSpinInProgress)
+            ApplyAirSpin(horizontalInput);
+        else if (!attractionActive || pullFront)
             AlignWithSurface(rearNormal);
 
         if (airborne)
@@ -499,6 +518,23 @@ public sealed class BodyBehindFollower : MonoBehaviour
         rearBody.MoveRotation(Quaternion.LookRotation(Tangent(normal), normal));
     }
 
+    private void ApplyAirSpin(float input)
+    {
+        rearBody.maxAngularVelocity = Mathf.Max(originalMaxAngularVelocity, maxAirSpinSpeed);
+        if (input == 0f || maxAirSpinSpeed <= 0f)
+            return;
+
+        Vector3 axis = gravityField.Axis;
+        float remainingSpeed = maxAirSpinSpeed -
+                               Vector3.Dot(rearBody.angularVelocity, axis) * input;
+        if (remainingSpeed > 0f)
+        {
+            float acceleration = Mathf.Min(airSpinAcceleration,
+                                           remainingSpeed / Time.fixedDeltaTime);
+            rearBody.AddTorque(axis * (input * acceleration), ForceMode.Acceleration);
+        }
+    }
+
     private Vector3 Tangent(Vector3 normal)
     {
         return Vector3.Cross(gravityField.Axis, normal).normalized * forwardSign;
@@ -536,13 +572,21 @@ public sealed class BodyBehindFollower : MonoBehaviour
 
     private SurfacePose SurfaceFor(FootState foot, Vector3 nearSurface)
     {
-        gravityField.SampleSupportSurface(nearSurface, frontCollider,
-                                          out Vector3 point, out Vector3 normal,
-                                          out Collider support,
-                                          liftHeight + foot.halfHeight + 0.75f);
+        bool found = gravityField.SampleSupportSurface(nearSurface, frontCollider,
+                                                       out Vector3 point, out Vector3 normal,
+                                                       out Collider support,
+                                                       Mathf.Max(footGroundSnapDistance,
+                                                                 liftHeight + foot.halfHeight + 0.75f));
+        Vector3 groundedPosition = point + normal * (foot.halfHeight - contactInset);
+        if (!found || Vector3.Distance(nearSurface, groundedPosition) > footGroundSnapDistance)
+        {
+            normal = gravityField.OutwardNormal(nearSurface);
+            support = null;
+            groundedPosition = nearSurface;
+        }
         return new SurfacePose
         {
-            position = point + normal * (foot.halfHeight - contactInset),
+            position = groundedPosition,
             normal = normal,
             rotation = Quaternion.LookRotation(Tangent(normal), normal),
             support = support
@@ -555,10 +599,13 @@ public sealed class BodyBehindFollower : MonoBehaviour
         foot.plantedRotation = pose.rotation;
         foot.plantedNormal = pose.normal;
         foot.plantedSupport = pose.support;
-        foot.plantedLocalPosition = pose.support.transform.InverseTransformPoint(pose.position);
-        foot.plantedLocalRotation = Quaternion.Inverse(pose.support.transform.rotation) * pose.rotation;
-        foot.plantedLocalNormal = pose.support.transform.InverseTransformDirection(pose.normal);
-        foot.swinging = false;
+        if (pose.support != null)
+        {
+            foot.plantedLocalPosition = pose.support.transform.InverseTransformPoint(pose.position);
+            foot.plantedLocalRotation = Quaternion.Inverse(pose.support.transform.rotation) * pose.rotation;
+            foot.plantedLocalNormal = pose.support.transform.InverseTransformDirection(pose.normal);
+        }
+        foot.swinging = pose.support == null;
         foot.body.MovePosition(pose.position);
         foot.body.MoveRotation(pose.rotation);
     }

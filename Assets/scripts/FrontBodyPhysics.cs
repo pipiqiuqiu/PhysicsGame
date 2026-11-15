@@ -21,6 +21,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     [SerializeField] private Transform hand1;
     [SerializeField] private Transform hand2;
     [SerializeField] private Camera previewCamera;
+    [SerializeField] private WallDetectorLaunch wallDetector;
 
     [Header("Tangential movement")]
     [SerializeField] private Vector3 forwardDirection = Vector3.back;
@@ -40,11 +41,17 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     [Min(0f)] [SerializeField] private float rearHandJumpBonus = 6f;
     [Min(0f)] [SerializeField] private float rearTravelImpulse = 20f;
 
+    [Header("Stacked jump rotation")]
+    [Min(0f)] [SerializeField] private float jumpSpinImpulse = 5f;
+    [Min(0f)] [SerializeField] private float airSpinAcceleration = 5f;
+    [Min(0f)] [SerializeField] private float maxAirSpinSpeed = 6f;
+
     [Header("Hand steps")]
     [Min(0.1f)] [SerializeField] private float stepCyclesPerSecond = 1.35f;
     [Min(0f)] [SerializeField] private float liftHeight = 0.65f;
     [Min(0f)] [SerializeField] private float stepLead = 0.35f;
     [Min(0f)] [SerializeField] private float contactInset = 0.06f;
+    [Min(0f)] [SerializeField] private float footGroundSnapDistance = 3f;
     [Min(0f)] [SerializeField] private float cameraFollowSpeed = 5f;
 
     private sealed class HandState
@@ -91,10 +98,13 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     private int heightCommand;
     private float jumpStartClearance;
     private float jumpTravelInput;
+    private float originalMaxAngularVelocity;
     private bool jumpRequested;
+    private bool jumpFromRearRequested;
     private bool jumpWithRearOnTopRequested;
     private bool airborne;
     private bool rearTravelJumpInProgress;
+    private bool stackedJumpSpinInProgress;
     private bool standingOnRear;
     private bool supportedByRear;
 
@@ -108,6 +118,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         }
 
         frontBody = GetComponent<Rigidbody>();
+        originalMaxAngularVelocity = frontBody.maxAngularVelocity;
         BoxCollider frontCollider = GetComponent<BoxCollider>();
         rearController = FindAnyObjectByType<BodyBehindFollower>();
         rearCollider = rearController != null ? rearController.GetComponent<Collider>() : null;
@@ -164,6 +175,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         if (keyboard != null && keyboard.spaceKey.wasPressedThisFrame)
         {
             jumpRequested = true;
+            jumpFromRearRequested = supportedByRear || standingOnRear;
             jumpTravelInput = movementInput;
             jumpWithRearOnTopRequested = rearController != null && rearController.CanJumpFromFront;
         }
@@ -193,8 +205,9 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         bool handOnRear = rearCollider != null &&
             ((left.plantedSupport == rearCollider && left.sensor.IsOnPlatform) ||
              (right.plantedSupport == rearCollider && right.sensor.IsOnPlatform));
-        supportedByRear = physicallyOnRear || handOnRear || standingOnRear;
-        bool onRear = heightCommand == 0 && physicallyOnRear;
+        bool rearBelowFront = IsOnTopOfRear(normal);
+        supportedByRear = physicallyOnRear || handOnRear || rearBelowFront || standingOnRear;
+        bool onRear = heightCommand == 0 && (physicallyOnRear || rearBelowFront);
         Vector3 tangent = Tangent(normal);
         float tangentialSpeed = Vector3.Dot(frontBody.linearVelocity, tangent);
 
@@ -214,16 +227,31 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         // The hands can both leave the surface during a step even while the
         // body's hover controller is supporting it. Use the airborne state
         // instead of transient hand contacts to decide whether it can jump.
-        if (jumpRequested && !airborne)
+        if (jumpRequested && wallDetector != null && wallDetector.TryLaunch())
         {
+            airborne = true;
+            standingOnRear = false;
+            airTime = 0f;
+            jumpStartClearance = clearance;
+        }
+        else if (jumpRequested && !airborne)
+        {
+            bool jumpingFromRear = jumpFromRearRequested || supportedByRear;
             // Either planted hand touching the rear body adds the bonus impulse.
             float impulse = jumpImpulse + (handOnRear ? rearHandJumpBonus : 0f);
             frontBody.AddForce(normal * impulse, ForceMode.Impulse);
-            if ((physicallyOnRear || handOnRear) && jumpTravelInput != 0f)
+            if (jumpingFromRear && jumpTravelInput != 0f)
             {
                 frontBody.AddForce(tangent * (jumpTravelInput * rearTravelImpulse),
                                    ForceMode.Impulse);
                 rearTravelJumpInProgress = true;
+            }
+            if (jumpingFromRear)
+            {
+                stackedJumpSpinInProgress = true;
+                if (jumpTravelInput != 0f)
+                    frontBody.AddTorque(gravityField.Axis * (jumpTravelInput * jumpSpinImpulse),
+                                        ForceMode.Impulse);
             }
             airborne = true;
             standingOnRear = false;
@@ -233,6 +261,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
                 rearController?.ScheduleGroundJumpAfterFront();
         }
         jumpRequested = false;
+        jumpFromRearRequested = false;
         jumpWithRearOnTopRequested = false;
         jumpTravelInput = 0f;
 
@@ -277,11 +306,17 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         }
 
         if (!airborne)
+        {
             rearTravelJumpInProgress = false;
+            stackedJumpSpinInProgress = false;
+            frontBody.maxAngularVelocity = originalMaxAngularVelocity;
+        }
         if (!rearTravelJumpInProgress && !pulledByRear)
             frontBody.AddForce(tangent * ((movementInput * moveSpeed - tangentialSpeed) * driveResponse),
                                ForceMode.Acceleration);
-        if (!pulledByRear)
+        if (stackedJumpSpinInProgress)
+            ApplyAirSpin(movementInput);
+        else if (!pulledByRear)
             AlignWithSurface(normal, tangent);
 
         if (airborne)
@@ -300,6 +335,35 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     {
         frontBody.angularVelocity = Vector3.zero;
         frontBody.MoveRotation(Quaternion.LookRotation(tangent, normal));
+    }
+
+    private bool IsOnTopOfRear(Vector3 normal)
+    {
+        if (rearCollider == null || !rearCollider.enabled)
+            return false;
+
+        Vector3 fromRear = frontBody.position - rearCollider.ClosestPoint(frontBody.position);
+        float heightAboveRear = Vector3.Dot(fromRear, normal);
+        return heightAboveRear >= frontHalfHeight - 0.75f &&
+               heightAboveRear <= frontHalfHeight + 0.75f &&
+               Vector3.ProjectOnPlane(fromRear, normal).sqrMagnitude <= 0.25f;
+    }
+
+    private void ApplyAirSpin(float input)
+    {
+        frontBody.maxAngularVelocity = Mathf.Max(originalMaxAngularVelocity, maxAirSpinSpeed);
+        if (input == 0f || maxAirSpinSpeed <= 0f)
+            return;
+
+        Vector3 axis = gravityField.Axis;
+        float remainingSpeed = maxAirSpinSpeed -
+                               Vector3.Dot(frontBody.angularVelocity, axis) * input;
+        if (remainingSpeed > 0f)
+        {
+            float acceleration = Mathf.Min(airSpinAcceleration,
+                                           remainingSpeed / Time.fixedDeltaTime);
+            frontBody.AddTorque(axis * (input * acceleration), ForceMode.Acceleration);
+        }
     }
 
     private Vector3 Tangent(Vector3 normal)
@@ -337,13 +401,21 @@ public sealed class FrontBodyPhysics : MonoBehaviour
 
     private SurfacePose SurfaceFor(HandState state, Vector3 nearSurface)
     {
-        gravityField.SampleSupportSurface(nearSurface, rearCollider,
-                                          out Vector3 point, out Vector3 normal,
-                                          out Collider support,
-                                          liftHeight + state.halfHeight + 0.75f);
+        bool found = gravityField.SampleSupportSurface(nearSurface, rearCollider,
+                                                       out Vector3 point, out Vector3 normal,
+                                                       out Collider support,
+                                                       Mathf.Max(footGroundSnapDistance,
+                                                                 liftHeight + state.halfHeight + 0.75f));
+        Vector3 groundedPosition = point + normal * (state.halfHeight - contactInset);
+        if (!found || Vector3.Distance(nearSurface, groundedPosition) > footGroundSnapDistance)
+        {
+            normal = gravityField.OutwardNormal(nearSurface);
+            support = null;
+            groundedPosition = nearSurface;
+        }
         return new SurfacePose
         {
-            position = point + normal * (state.halfHeight - contactInset),
+            position = groundedPosition,
             normal = normal,
             rotation = Quaternion.LookRotation(Tangent(normal), normal),
             support = support
@@ -356,10 +428,13 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         state.plantedRotation = pose.rotation;
         state.plantedNormal = pose.normal;
         state.plantedSupport = pose.support;
-        state.plantedLocalPosition = pose.support.transform.InverseTransformPoint(pose.position);
-        state.plantedLocalRotation = Quaternion.Inverse(pose.support.transform.rotation) * pose.rotation;
-        state.plantedLocalNormal = pose.support.transform.InverseTransformDirection(pose.normal);
-        state.swinging = false;
+        if (pose.support != null)
+        {
+            state.plantedLocalPosition = pose.support.transform.InverseTransformPoint(pose.position);
+            state.plantedLocalRotation = Quaternion.Inverse(pose.support.transform.rotation) * pose.rotation;
+            state.plantedLocalNormal = pose.support.transform.InverseTransformDirection(pose.normal);
+        }
+        state.swinging = pose.support == null;
         state.body.MovePosition(pose.position);
         state.body.MoveRotation(pose.rotation);
     }
