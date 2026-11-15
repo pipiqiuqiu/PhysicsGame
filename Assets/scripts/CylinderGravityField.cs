@@ -71,7 +71,8 @@ public sealed class CylinderGravityField : MonoBehaviour
 
         foreach (Rigidbody body in bodies)
         {
-            if (body == null || body.isKinematic || HasFloorTag(body.transform))
+            if (body == null || body.isKinematic || HasFloorTag(body.transform) ||
+                body.GetComponentInParent<HumanBuilding>() != null)
                 continue;
 
             body.useGravity = false;

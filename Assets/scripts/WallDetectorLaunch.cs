@@ -13,6 +13,9 @@ public sealed class WallDetectorLaunch : MonoBehaviour
     private Quaternion initialRotation;
     private float distanceFromFront;
     private readonly Collider[] overlapBuffer = new Collider[32];
+    private HumanBuilding detectedBuilding;
+    private HumanBuilding chargingBuilding;
+    private float chargeEndTime;
 
     public bool IsTouchingWall { get; private set; }
 
@@ -40,7 +43,9 @@ public sealed class WallDetectorLaunch : MonoBehaviour
     private void FixedUpdate()
     {
         UpdatePose();
-        IsTouchingWall = HasWallOverlap();
+        UpdateDetection();
+        if (chargingBuilding != null && Time.fixedTime > chargeEndTime)
+            chargingBuilding = null;
     }
 
     private void LateUpdate()
@@ -54,12 +59,40 @@ public sealed class WallDetectorLaunch : MonoBehaviour
             return false;
 
         UpdatePose();
-        IsTouchingWall = HasWallOverlap();
+        UpdateDetection();
         if (!IsTouchingWall)
             return false;
 
+        if (detectedBuilding != null)
+        {
+            chargingBuilding = detectedBuilding;
+            chargeEndTime = Time.fixedTime + 3f;
+        }
+
         frontBody.AddForce(launchDirection * launchImpulse, ForceMode.Impulse);
         return true;
+    }
+
+    private void OnTriggerEnter(Collider other)
+    {
+        TryHitBuilding(other);
+    }
+
+    private void OnTriggerStay(Collider other)
+    {
+        TryHitBuilding(other);
+    }
+
+    private void TryHitBuilding(Collider other)
+    {
+        if (chargingBuilding == null || Time.fixedTime > chargeEndTime || other == null)
+            return;
+
+        HumanBuilding hitBuilding = other.GetComponentInParent<HumanBuilding>();
+        if (hitBuilding != chargingBuilding)
+            return;
+
+        hitBuilding.ReleasePiece(other.attachedRigidbody);
     }
 
     private void UpdatePose()
@@ -74,7 +107,7 @@ public sealed class WallDetectorLaunch : MonoBehaviour
                                          Quaternion.AngleAxis(angle, Vector3.right) * initialRotation);
     }
 
-    private bool HasWallOverlap()
+    private void UpdateDetection()
     {
         Vector3 scale = transform.lossyScale;
         Vector3 size = detectorCollider.size;
@@ -89,26 +122,38 @@ public sealed class WallDetectorLaunch : MonoBehaviour
         {
             Collider[] allOverlaps = Physics.OverlapBox(center, halfExtents, transform.rotation,
                                                         ~0, QueryTriggerInteraction.Collide);
-            return ContainsWall(allOverlaps, allOverlaps.Length);
+            ScanOverlaps(allOverlaps, allOverlaps.Length);
+            return;
         }
 
-        return ContainsWall(overlapBuffer, count);
+        ScanOverlaps(overlapBuffer, count);
     }
 
-    private bool ContainsWall(Collider[] overlaps, int count)
+    private void ScanOverlaps(Collider[] overlaps, int count)
     {
+        HumanBuilding building = null;
+        bool wallFound = false;
         for (int i = 0; i < count; i++)
         {
             Collider other = overlaps[i];
             if (other == null || other == detectorCollider || other.attachedRigidbody == frontBody)
                 continue;
 
+            HumanBuilding candidate = other.GetComponentInParent<HumanBuilding>();
+            if (candidate != null)
+                building = candidate;
+
             for (Transform current = other.transform; current != null; current = current.parent)
             {
                 if (current.CompareTag("wall"))
-                    return true;
+                {
+                    wallFound = true;
+                    break;
+                }
             }
         }
-        return false;
+
+        detectedBuilding = building;
+        IsTouchingWall = wallFound || building != null;
     }
 }
