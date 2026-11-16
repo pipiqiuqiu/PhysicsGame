@@ -14,7 +14,6 @@ public sealed class BodyBehindFollower : MonoBehaviour
         (FootOnGround(left) || FootOnGround(right));
     public bool CanJumpWhileSupportingFront => enabled && !airborne &&
         frontController != null && frontController.IsSupportedByRear;
-    public bool IsPullingFront => enabled && attractionActive && pullFront;
 
     public void ScheduleGroundJumpAfterFront()
     {
@@ -38,6 +37,7 @@ public sealed class BodyBehindFollower : MonoBehaviour
     [Min(0f)] [SerializeField] private float axialDamping = 8f;
     [Min(0f)] [SerializeField] private float hoverSpring = 25f;
     [Min(0f)] [SerializeField] private float hoverDamping = 10f;
+    [Min(0f)] [SerializeField] private float maxHoverAcceleration = 60f;
     [Min(1f)] [SerializeField] private float raisedClearanceMultiplier = 2f;
     [Range(0f, 1f)] [SerializeField] private float loweredClearanceMultiplier = 0.5f;
 
@@ -52,6 +52,7 @@ public sealed class BodyBehindFollower : MonoBehaviour
     [Min(0f)] [SerializeField] private float attractionDamping = 12f;
     [Min(0f)] [SerializeField] private float maxAttractionAcceleration = 100f;
     [Min(0f)] [SerializeField] private float maxAttractionClosingSpeed = 8f;
+    [Min(0f)] [SerializeField] private float attractionLiftImpulse = 8f;
     [Min(0f)] [SerializeField] private float attractionSpinSpeed = 4f;
     [Min(0f)] [SerializeField] private float attractionSpinResponse = 10f;
     [Min(0f)] [SerializeField] private float maxAttractionSpinAcceleration = 20f;
@@ -130,7 +131,6 @@ public sealed class BodyBehindFollower : MonoBehaviour
     private bool standingOnFront;
     private bool stackedJumpSpinInProgress;
     private bool attractionActive;
-    private bool pullFront;
 
     private void Awake()
     {
@@ -240,10 +240,8 @@ public sealed class BodyBehindFollower : MonoBehaviour
 
         gravityField.SampleSurface(rearBody.position, out Vector3 rearSurface, out _);
         float rearClearance = Vector3.Dot(rearBody.position - rearSurface, rearNormal);
-        gravityField.SampleSurface(frontBody.position, out Vector3 frontSurface, out _);
-        float frontClearance = Vector3.Dot(frontBody.position - frontSurface, frontNormal);
-        ApplyAttraction(frontClearance, rearClearance);
-        if (attractionActive && !pullFront)
+        ApplyAttraction();
+        if (attractionActive)
         {
             if (!airborne)
             {
@@ -297,7 +295,7 @@ public sealed class BodyBehindFollower : MonoBehaviour
         if (airborne)
         {
             airTime += Time.fixedDeltaTime;
-            if (airTime >= 0.25f)
+            if (!attractionActive && airTime >= 0.25f)
             {
                 if (onFront)
                 {
@@ -360,14 +358,19 @@ public sealed class BodyBehindFollower : MonoBehaviour
                            initialAxialOffset;
         float axialSpeed = Vector3.Dot(rearBody.linearVelocity, axis);
         if (!attractionActive)
-            rearBody.AddForce(axis * (axialError * axialSpring - axialSpeed * axialDamping),
-                              ForceMode.Acceleration);
+        {
+            float axialAcceleration = Mathf.Clamp(
+                axialError * axialSpring - axialSpeed * axialDamping,
+                -maxAcceleration, maxAcceleration);
+            rearBody.AddForce(axis * axialAcceleration, ForceMode.Acceleration);
+        }
 
         float radialSpeed = Vector3.Dot(rearBody.linearVelocity, rearNormal);
-        float radialAcceleration = gravityField.GravityAcceleration +
+        float radialAcceleration = Mathf.Clamp(gravityField.GravityAcceleration +
                                    (desiredClearance - rearClearance) * hoverSpring -
-                                   radialSpeed * hoverDamping;
-        if (!airborne && !standingOnFront && !(attractionActive && !pullFront))
+                                   radialSpeed * hoverDamping,
+                                   -maxHoverAcceleration, maxHoverAcceleration);
+        if (!airborne && !standingOnFront && !attractionActive)
             rearBody.AddForce(rearNormal * radialAcceleration, ForceMode.Acceleration);
         if (!airborne)
         {
@@ -377,7 +380,7 @@ public sealed class BodyBehindFollower : MonoBehaviour
         }
         if (stackedJumpSpinInProgress)
             ApplyAirSpin(horizontalInput);
-        else if (!attractionActive || pullFront)
+        else if (!attractionActive)
             AlignWithSurface(rearNormal);
 
         if (airborne)
@@ -406,25 +409,31 @@ public sealed class BodyBehindFollower : MonoBehaviour
         return foot != null && foot.sensor.IsOnGround;
     }
 
-    private void ApplyAttraction(float frontClearance, float rearClearance)
+    private void ApplyAttraction()
     {
         float distance = Vector3.Distance(frontBody.position, rearBody.position);
+        Vector3 axis = gravityField.Axis;
+        Vector3 center = gravityField.Center;
+        Vector3 rearNormal = gravityField.OutwardNormal(rearBody.position);
+        float frontRadius = Vector3.ProjectOnPlane(frontBody.position - center, axis).magnitude;
+        float rearRadius = Vector3.ProjectOnPlane(rearBody.position - center, axis).magnitude;
+        float radialGap = frontRadius - rearRadius;
         if (!attractionActive)
         {
             float startDistance = Mathf.Max(attractionStartDistance, defaultBodyDistance + 0.1f);
             if (distance <= startDistance)
                 return;
 
-            // At equal heights, keep the front body as the anchor.
-            pullFront = frontClearance < rearClearance;
             attractionActive = true;
+            // Give the rear body a real takeoff when the front is above it.
+            // Setting airborne alone only changes the locomotion state.
+            if (!airborne && radialGap > 0.5f && attractionLiftImpulse > 0f)
+                rearBody.AddForce(rearNormal * attractionLiftImpulse, ForceMode.Impulse);
         }
 
-        Rigidbody lowerBody = pullFront ? frontBody : rearBody;
-        Rigidbody higherBody = pullFront ? rearBody : frontBody;
-        Vector3 towardHigher = (higherBody.position - lowerBody.position).normalized;
-        float closingSpeed = Vector3.Dot(lowerBody.linearVelocity - higherBody.linearVelocity,
-                                         towardHigher);
+        Vector3 towardFront = (frontBody.position - rearBody.position).normalized;
+        float closingSpeed = Vector3.Dot(rearBody.linearVelocity - frontBody.linearVelocity,
+                                         towardFront);
         if (distance <= defaultBodyDistance + 0.15f && Mathf.Abs(closingSpeed) <= 0.5f)
         {
             attractionActive = false;
@@ -443,19 +452,31 @@ public sealed class BodyBehindFollower : MonoBehaviour
                                      Mathf.Max(-maxAttractionAcceleration,
                                                speedLimitAcceleration));
         }
-        lowerBody.AddForce(towardHigher * acceleration, ForceMode.Acceleration);
+        rearBody.AddForce(towardFront * acceleration, ForceMode.Acceleration);
 
-        Vector3 axis = gravityField.Axis;
+        // The long spring often points almost along the ground. Supply the
+        // missing outward component so the rear can rise toward a higher front.
+        if (radialGap > 0.5f)
+        {
+            float radialSpeed = Vector3.Dot(rearBody.linearVelocity, rearNormal);
+            float pullRadialAcceleration = acceleration * Vector3.Dot(towardFront, rearNormal);
+            float liftAcceleration = Mathf.Clamp(
+                gravityField.GravityAcceleration + radialGap * hoverSpring -
+                radialSpeed * hoverDamping - pullRadialAcceleration,
+                -maxHoverAcceleration, maxHoverAcceleration);
+            rearBody.AddForce(rearNormal * liftAcceleration, ForceMode.Acceleration);
+        }
+
         Vector3 tangent = Vector3.Cross(axis,
-                                        gravityField.OutwardNormal(lowerBody.position)).normalized;
-        float tangentialPull = Vector3.Dot(towardHigher, tangent);
+                                        rearNormal).normalized;
+        float tangentialPull = Vector3.Dot(towardFront, tangent);
         float desiredAngularSpeed = Mathf.Abs(tangentialPull) > 0.05f
             ? Mathf.Sign(tangentialPull) * attractionSpinSpeed : 0f;
-        float currentAngularSpeed = Vector3.Dot(lowerBody.angularVelocity, axis);
+        float currentAngularSpeed = Vector3.Dot(rearBody.angularVelocity, axis);
         float spinAcceleration = Mathf.Clamp(
             (desiredAngularSpeed - currentAngularSpeed) * attractionSpinResponse,
             -maxAttractionSpinAcceleration, maxAttractionSpinAcceleration);
-        lowerBody.AddTorque(axis * spinAcceleration, ForceMode.Acceleration);
+        rearBody.AddTorque(axis * spinAcceleration, ForceMode.Acceleration);
     }
 
     private void ApplySeparation(Vector3 frontNormal, Vector3 rearNormal,

@@ -1,20 +1,20 @@
 using System.Collections.Generic;
 using UnityEngine;
 
-/// <summary>Reports contact between one limb trigger and either walkable surface.</summary>
+/// <summary>Reports contact between a limb trigger and nearby solid supports.</summary>
 public sealed class HandGroundSensor : MonoBehaviour
 {
     private Collider ground;
     private Collider platform;
-    private readonly HashSet<Collider> touchingFloors = new HashSet<Collider>();
+    private readonly HashSet<Collider> touchingSurfaces = new HashSet<Collider>();
     private bool touchingPlatform;
     private float lastContactTime = float.NegativeInfinity;
     private float lastGroundContactTime = float.NegativeInfinity;
     private float lastPlatformContactTime = float.NegativeInfinity;
 
-    public bool IsGrounded => (touchingFloors.Count > 0 || touchingPlatform) &&
+    public bool IsGrounded => (touchingSurfaces.Count > 0 || touchingPlatform) &&
                               Time.fixedTime - lastContactTime <= Time.fixedDeltaTime * 1.5f;
-    public bool IsOnGround => touchingFloors.Count > 0 &&
+    public bool IsOnGround => touchingSurfaces.Count > 0 &&
                               Time.fixedTime - lastGroundContactTime <= Time.fixedDeltaTime * 1.5f;
     public bool IsOnPlatform => touchingPlatform &&
                                 Time.fixedTime - lastPlatformContactTime <= Time.fixedDeltaTime * 1.5f;
@@ -23,7 +23,7 @@ public sealed class HandGroundSensor : MonoBehaviour
     {
         ground = groundCollider;
         platform = platformCollider;
-        touchingFloors.Clear();
+        touchingSurfaces.Clear();
         touchingPlatform = false;
         lastContactTime = float.NegativeInfinity;
         lastGroundContactTime = float.NegativeInfinity;
@@ -42,10 +42,9 @@ public sealed class HandGroundSensor : MonoBehaviour
 
     private void OnTriggerExit(Collider other)
     {
-        if (other == ground || CylinderGravityField.IsFloor(other))
+        if (touchingSurfaces.Remove(other))
         {
-            touchingFloors.Remove(other);
-            if (touchingFloors.Count == 0)
+            if (touchingSurfaces.Count == 0)
                 lastGroundContactTime = float.NegativeInfinity;
         }
         if (other == platform)
@@ -53,15 +52,15 @@ public sealed class HandGroundSensor : MonoBehaviour
             touchingPlatform = false;
             lastPlatformContactTime = float.NegativeInfinity;
         }
-        if (touchingFloors.Count == 0 && !touchingPlatform)
+        if (touchingSurfaces.Count == 0 && !touchingPlatform)
             lastContactTime = float.NegativeInfinity;
     }
 
     private void RecordContact(Collider other)
     {
-        if (other == ground || CylinderGravityField.IsFloor(other))
+        if (other == ground || CylinderGravityField.IsWalkableCollider(other, transform.root))
         {
-            touchingFloors.Add(other);
+            touchingSurfaces.Add(other);
             lastGroundContactTime = Time.fixedTime;
         }
         else if (other == platform)

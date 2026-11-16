@@ -27,6 +27,11 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     [SerializeField] private Vector3 forwardDirection = Vector3.back;
     [Min(0f)] [SerializeField] private float moveSpeed = 2.2f;
     [Min(0f)] [SerializeField] private float driveResponse = 8f;
+    [Min(0f)] [SerializeField] private float maxDriveAcceleration = 80f;
+
+    [Header("Collision response")]
+    [Min(0f)] [SerializeField] private float maxImpactSpeed = 12f;
+    [Min(0f)] [SerializeField] private float impactLogThreshold = 10f;
 
     [Header("Distance from surface")]
     [Min(0f)] [SerializeField] private float surfaceClearance = 0f;
@@ -34,6 +39,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     [Range(0f, 1f)] [SerializeField] private float loweredClearanceMultiplier = 0.5f;
     [Min(0f)] [SerializeField] private float hoverSpring = 25f;
     [Min(0f)] [SerializeField] private float hoverDamping = 10f;
+    [Min(0f)] [SerializeField] private float maxHoverAcceleration = 60f;
 
     [Header("Jump")]
     [Min(0f)] [SerializeField] private float jumpImpulse = 8f;
@@ -107,6 +113,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     private bool stackedJumpSpinInProgress;
     private bool standingOnRear;
     private bool supportedByRear;
+    private float nextImpactWarningTime;
 
     private void Awake()
     {
@@ -214,16 +221,6 @@ public sealed class FrontBodyPhysics : MonoBehaviour
         float heightMultiplier = heightCommand > 0 ? raisedClearanceMultiplier :
                                  heightCommand < 0 ? loweredClearanceMultiplier : 1f;
         float targetClearance = baseClearance * heightMultiplier;
-        bool pulledByRear = rearController != null && rearController.IsPullingFront;
-        if (pulledByRear)
-        {
-            if (!airborne)
-            {
-                airborne = true;
-                standingOnRear = false;
-                airTime = 0f;
-            }
-        }
         // The hands can both leave the surface during a step even while the
         // body's hover controller is supporting it. Use the airborne state
         // instead of transient hand contacts to decide whether it can jump.
@@ -295,13 +292,14 @@ public sealed class FrontBodyPhysics : MonoBehaviour
             }
         }
 
-        if (!airborne && !standingOnRear && !pulledByRear)
+        if (!airborne && !standingOnRear)
         {
             // The gravity field pulls inward; the hover force balances it and
             // acts like a spring that maintains the chosen radial clearance.
-            float acceleration = gravityField.GravityAcceleration +
+            float acceleration = Mathf.Clamp(gravityField.GravityAcceleration +
                                  (targetClearance - clearance) * hoverSpring -
-                                 radialSpeed * hoverDamping;
+                                 radialSpeed * hoverDamping,
+                                 -maxHoverAcceleration, maxHoverAcceleration);
             frontBody.AddForce(normal * acceleration, ForceMode.Acceleration);
         }
 
@@ -311,12 +309,16 @@ public sealed class FrontBodyPhysics : MonoBehaviour
             stackedJumpSpinInProgress = false;
             frontBody.maxAngularVelocity = originalMaxAngularVelocity;
         }
-        if (!rearTravelJumpInProgress && !pulledByRear)
-            frontBody.AddForce(tangent * ((movementInput * moveSpeed - tangentialSpeed) * driveResponse),
-                               ForceMode.Acceleration);
+        if (!rearTravelJumpInProgress)
+        {
+            float driveAcceleration = Mathf.Clamp(
+                (movementInput * moveSpeed - tangentialSpeed) * driveResponse,
+                -maxDriveAcceleration, maxDriveAcceleration);
+            frontBody.AddForce(tangent * driveAcceleration, ForceMode.Acceleration);
+        }
         if (stackedJumpSpinInProgress)
             ApplyAirSpin(movementInput);
-        else if (!pulledByRear)
+        else
             AlignWithSurface(normal, tangent);
 
         if (airborne)
@@ -335,6 +337,42 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     {
         frontBody.angularVelocity = Vector3.zero;
         frontBody.MoveRotation(Quaternion.LookRotation(tangent, normal));
+    }
+
+    private void OnCollisionEnter(Collision collision)
+    {
+        LimitDynamicImpact(collision);
+    }
+
+    private void OnCollisionStay(Collision collision)
+    {
+        LimitDynamicImpact(collision);
+    }
+
+    private void LimitDynamicImpact(Collision collision)
+    {
+        Rigidbody otherBody = collision.rigidbody;
+        if (frontBody == null || otherBody == null ||
+            otherBody.isKinematic || (rearController != null &&
+            otherBody == rearController.GetComponent<Rigidbody>()))
+            return;
+
+        Vector3 velocity = frontBody.linearVelocity;
+        bool limited = maxImpactSpeed > 0f &&
+                       velocity.sqrMagnitude > maxImpactSpeed * maxImpactSpeed;
+        if (limited)
+            frontBody.linearVelocity = velocity.normalized * maxImpactSpeed;
+        if ((limited || collision.impulse.magnitude >= impactLogThreshold) &&
+            Time.time >= nextImpactWarningTime)
+        {
+            Debug.LogWarning($"body_front impact with {collision.gameObject.name}: " +
+                $"relative speed {collision.relativeVelocity.magnitude:F1}, " +
+                $"contact impulse {collision.impulse.magnitude:F1}, " +
+                $"other mass {otherBody.mass:F2}, " +
+                $"front speed {velocity.magnitude:F1}" +
+                (limited ? $" (limited to {maxImpactSpeed:F1})." : "."), this);
+            nextImpactWarningTime = Time.time + 1f;
+        }
     }
 
     private bool IsOnTopOfRear(Vector3 normal)

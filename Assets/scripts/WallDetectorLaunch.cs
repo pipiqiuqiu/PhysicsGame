@@ -6,6 +6,7 @@ public sealed class WallDetectorLaunch : MonoBehaviour
     [SerializeField] private Rigidbody frontBody;
     [SerializeField] private Rigidbody rearBody;
     [Min(0f)] [SerializeField] private float launchImpulse = 20f;
+    [Min(0f)] [SerializeField] private float maxLaunchSpeed = 25f;
 
     private BoxCollider detectorCollider;
     private Vector3 initialDirection;
@@ -16,6 +17,7 @@ public sealed class WallDetectorLaunch : MonoBehaviour
     private HumanBuilding detectedBuilding;
     private HumanBuilding chargingBuilding;
     private float chargeEndTime;
+    private int chargeId;
 
     public bool IsTouchingWall { get; private set; }
 
@@ -65,11 +67,20 @@ public sealed class WallDetectorLaunch : MonoBehaviour
 
         if (detectedBuilding != null)
         {
+            chargeId++;
             chargingBuilding = detectedBuilding;
             chargeEndTime = Time.fixedTime + 3f;
         }
+        else
+            chargingBuilding = null;
 
-        frontBody.AddForce(launchDirection * launchImpulse, ForceMode.Impulse);
+        // A second charge can happen before the first has slowed down. Limit the
+        // resulting forward speed instead of stacking the full impulse each time.
+        float forwardSpeed = Vector3.Dot(frontBody.linearVelocity, launchDirection);
+        float availableImpulse = Mathf.Max(0f, maxLaunchSpeed - forwardSpeed) * frontBody.mass;
+        float appliedImpulse = Mathf.Min(launchImpulse, availableImpulse);
+        if (appliedImpulse > 0f)
+            frontBody.AddForce(launchDirection * appliedImpulse, ForceMode.Impulse);
         return true;
     }
 
@@ -92,7 +103,7 @@ public sealed class WallDetectorLaunch : MonoBehaviour
         if (hitBuilding != chargingBuilding)
             return;
 
-        hitBuilding.ReleasePiece(other.attachedRigidbody);
+        hitBuilding.RegisterChargeHit(other.attachedRigidbody, chargeId);
     }
 
     private void UpdatePose()

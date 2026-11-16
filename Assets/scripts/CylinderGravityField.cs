@@ -7,7 +7,7 @@ public sealed class CylinderGravityField : MonoBehaviour
 
     private Transform cylinder;
     private Collider groundCollider;
-    private Collider[] floorColliders;
+    private Collider[] supportColliders;
     private Vector3 localCenter;
     private float localRadius;
     private Rigidbody[] bodies;
@@ -52,7 +52,7 @@ public sealed class CylinderGravityField : MonoBehaviour
             groundCollider = meshCollider;
         }
 
-        RefreshFloorColliders();
+        RefreshSupportColliders();
         RefreshBodies();
         return true;
     }
@@ -65,7 +65,7 @@ public sealed class CylinderGravityField : MonoBehaviour
         if (Time.fixedTime >= nextRefreshTime)
         {
             RefreshBodies();
-            RefreshFloorColliders();
+            RefreshSupportColliders();
             nextRefreshTime = Time.fixedTime + 0.5f;
         }
 
@@ -86,26 +86,30 @@ public sealed class CylinderGravityField : MonoBehaviour
         bodies = FindObjectsByType<Rigidbody>();
     }
 
-    private void RefreshFloorColliders()
+    private void RefreshSupportColliders()
     {
         EnsureTaggedFloorColliders();
         Collider[] allColliders = FindObjectsByType<Collider>();
         int count = 0;
         foreach (Collider candidate in allColliders)
         {
-            if (candidate != null && candidate.enabled && !candidate.isTrigger &&
-                (candidate == groundCollider || IsFloor(candidate)))
+            if (IsWalkableCollider(candidate, transform))
                 count++;
         }
 
-        floorColliders = new Collider[count];
+        supportColliders = new Collider[count];
         int index = 0;
         foreach (Collider candidate in allColliders)
         {
-            if (candidate != null && candidate.enabled && !candidate.isTrigger &&
-                (candidate == groundCollider || IsFloor(candidate)))
-                floorColliders[index++] = candidate;
+            if (IsWalkableCollider(candidate, transform))
+                supportColliders[index++] = candidate;
         }
+    }
+
+    public static bool IsWalkableCollider(Collider candidate, Transform creatureRoot)
+    {
+        return candidate != null && candidate.enabled && !candidate.isTrigger &&
+               (creatureRoot == null || !candidate.transform.IsChildOf(creatureRoot));
     }
 
     private void EnsureTaggedFloorColliders()
@@ -163,7 +167,7 @@ public sealed class CylinderGravityField : MonoBehaviour
 
     public bool SampleSurface(Vector3 position, out Vector3 point, out Vector3 normal)
     {
-        return SampleFloorSurface(position, out point, out normal, out _);
+        return SampleWalkableSurface(position, out point, out normal, out _);
     }
 
     /// <summary>Finds the outermost walkable surface beneath a point on the cylinder.</summary>
@@ -172,7 +176,7 @@ public sealed class CylinderGravityField : MonoBehaviour
                                      out Collider support,
                                      float maxPlatformDistance = float.PositiveInfinity)
     {
-        bool foundGround = SampleFloorSurface(position, out point, out normal, out support);
+        bool foundGround = SampleWalkableSurface(position, out point, out normal, out support);
         Vector3 outward = OutwardNormal(position);
         Ray ray = new Ray(position + outward * 30f, -outward);
 
@@ -191,8 +195,8 @@ public sealed class CylinderGravityField : MonoBehaviour
         return foundGround;
     }
 
-    private bool SampleFloorSurface(Vector3 position, out Vector3 point,
-                                    out Vector3 normal, out Collider support)
+    private bool SampleWalkableSurface(Vector3 position, out Vector3 point,
+                                       out Vector3 normal, out Collider support)
     {
         Vector3 outward = OutwardNormal(position);
         Ray ray = new Ray(position + outward * 30f, -outward);
@@ -202,27 +206,28 @@ public sealed class CylinderGravityField : MonoBehaviour
         normal = outward;
         support = groundCollider;
 
-        if (floorColliders != null)
+        if (supportColliders != null)
         {
-            foreach (Collider floor in floorColliders)
+            foreach (Collider candidate in supportColliders)
             {
-                if (floor == null || !floor.enabled || floor.isTrigger ||
-                    !floor.Raycast(ray, out RaycastHit hit, 60f))
+                if (!IsWalkableCollider(candidate, transform) ||
+                    !candidate.Raycast(ray, out RaycastHit hit, 60f))
                     continue;
 
                 float heightFromBody = Vector3.Dot(hit.point - position, outward);
                 if (heightFromBody > 1f)
                     continue;
 
+                float normalAlignment = Vector3.Dot(hit.normal, outward);
                 float height = Vector3.Dot(hit.point - Center, outward);
                 if (!found || height > bestHeight)
                 {
                     found = true;
                     bestHeight = height;
                     point = hit.point;
-                    normal = Vector3.Dot(hit.normal, outward) >= 0.35f
+                    normal = normalAlignment >= 0.35f
                         ? hit.normal : outward;
-                    support = floor;
+                    support = candidate;
                 }
             }
         }
