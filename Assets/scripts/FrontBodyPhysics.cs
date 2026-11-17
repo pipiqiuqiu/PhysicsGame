@@ -15,6 +15,17 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     public int HeightCommand => heightCommand;
     public float JumpStartClearance => jumpStartClearance;
     public float ForwardTangentSign => forwardSign;
+    public Vector3 BlackHoleInputDirection
+    {
+        get
+        {
+            Vector3 screenRight = previewCamera != null ? previewCamera.transform.right : Vector3.forward;
+            Vector3 screenUp = previewCamera != null ? previewCamera.transform.up : Vector3.up;
+            Vector3 direction = screenRight * movementInput + screenUp * heightCommand;
+            direction.x = 0f;
+            return direction.sqrMagnitude > 0.0001f ? direction.normalized : Vector3.zero;
+        }
+    }
 
     [Header("References")]
     [SerializeField] private CylinderGravityField gravityField;
@@ -89,6 +100,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
 
     private Rigidbody frontBody;
     private BodyBehindFollower rearController;
+    private BlackHoleZone blackHoleZone;
     private Collider rearCollider;
     private float frontHalfHeight;
     private HandState left;
@@ -192,6 +204,13 @@ public sealed class FrontBodyPhysics : MonoBehaviour
     {
         float dt = Time.fixedDeltaTime;
         stepTime += dt;
+
+        blackHoleZone = BlackHoleZone.FindContainingCharacter();
+        if (blackHoleZone != null)
+        {
+            UpdateInsideBlackHole();
+            return;
+        }
 
         gravityField.SampleSurface(frontBody.position, out Vector3 surfacePoint, out Vector3 normal);
         float clearance = Vector3.Dot(frontBody.position - surfacePoint, normal);
@@ -331,6 +350,33 @@ public sealed class FrontBodyPhysics : MonoBehaviour
             UpdateHand(left, 0f, tangent);
             UpdateHand(right, 0.5f, tangent);
         }
+    }
+
+    private void UpdateInsideBlackHole()
+    {
+        airborne = true;
+        airTime = 0f;
+        standingOnRear = false;
+        supportedByRear = false;
+        rearTravelJumpInProgress = false;
+        stackedJumpSpinInProgress = false;
+        frontBody.maxAngularVelocity = originalMaxAngularVelocity;
+
+        if (jumpRequested && wallDetector != null)
+            wallDetector.TryLaunch();
+
+        jumpRequested = false;
+        jumpFromRearRequested = false;
+        jumpWithRearOnTopRequested = false;
+        jumpTravelInput = 0f;
+
+        blackHoleZone.ApplyAttraction(frontBody);
+        Vector3 inputDirection = BlackHoleInputDirection;
+        blackHoleZone.ApplySteering(inputDirection);
+        Vector3 paddleOffset = blackHoleZone.GetPaddleOffset(inputDirection);
+        Vector3 normal = gravityField.OutwardNormal(frontBody.position);
+        MoveAirborneHand(left, normal, paddleOffset);
+        MoveAirborneHand(right, normal, paddleOffset);
     }
 
     private void AlignWithSurface(Vector3 normal, Vector3 tangent)
@@ -525,7 +571,12 @@ public sealed class FrontBodyPhysics : MonoBehaviour
 
     private void MoveAirborneHand(HandState state, Vector3 normal)
     {
-        Vector3 position = transform.TransformPoint(state.restLocalPosition) + normal * 0.2f;
+        MoveAirborneHand(state, normal, Vector3.zero);
+    }
+
+    private void MoveAirborneHand(HandState state, Vector3 normal, Vector3 offset)
+    {
+        Vector3 position = transform.TransformPoint(state.restLocalPosition) + normal * 0.2f + offset;
         state.body.MovePosition(position);
         state.body.MoveRotation(frontBody.rotation);
         state.swingStart = position;

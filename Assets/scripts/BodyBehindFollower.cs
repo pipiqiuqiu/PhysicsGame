@@ -57,6 +57,13 @@ public sealed class BodyBehindFollower : MonoBehaviour
     [Min(0f)] [SerializeField] private float attractionSpinResponse = 10f;
     [Min(0f)] [SerializeField] private float maxAttractionSpinAcceleration = 20f;
 
+    [Header("Overstretched spring recovery")]
+    [Min(0f)] [SerializeField] private float maxSpringLength = 15f;
+    [Min(0f)] [SerializeField] private float overstretchSpring = 80f;
+    [Min(0f)] [SerializeField] private float overstretchDamping = 12f;
+    [Min(0f)] [SerializeField] private float maxOverstretchAcceleration = 200f;
+    [Min(0f)] [SerializeField] private float teleportSpringLength = 30f;
+
     [Header("Rear jump")]
     [Min(0f)] [SerializeField] private float footOnGroundJumpImpulse = 8f;
     [Min(0f)] [SerializeField] private float groundJumpDelay = 0.5f;
@@ -106,6 +113,7 @@ public sealed class BodyBehindFollower : MonoBehaviour
     }
 
     private Rigidbody rearBody;
+    private BlackHoleZone blackHoleZone;
     private Collider frontCollider;
     private Collider rearCollider;
     private FootState left;
@@ -211,6 +219,16 @@ public sealed class BodyBehindFollower : MonoBehaviour
     private void FixedUpdate()
     {
         stepTime += Time.fixedDeltaTime;
+        if (TryTeleportOverstretchedRear())
+            return;
+        ApplyOverstretchRecovery();
+        blackHoleZone = BlackHoleZone.FindContainingCharacter();
+        if (blackHoleZone != null)
+        {
+            UpdateInsideBlackHole();
+            return;
+        }
+
         if (groundJumpPending && Time.fixedTime >= groundJumpReadyTime)
         {
             groundJumpPending = false;
@@ -395,6 +413,110 @@ public sealed class BodyBehindFollower : MonoBehaviour
             UpdateFoot(left, 0.25f, strideInput);
             UpdateFoot(right, 0.75f, strideInput);
         }
+    }
+
+    private bool TryTeleportOverstretchedRear()
+    {
+        if (Vector3.Distance(frontBody.position, rearBody.position) <= teleportSpringLength)
+            return false;
+
+        Vector3 destination = frontBody.position;
+        destination.x = rearBody.position.x;
+        rearBody.position = destination;
+        Vector3 normal = gravityField.OutwardNormal(destination);
+        rearBody.rotation = Quaternion.LookRotation(Tangent(normal), normal);
+        Vector3 velocity = frontBody.linearVelocity;
+        velocity.x = 0f;
+        rearBody.linearVelocity = velocity;
+        rearBody.angularVelocity = Vector3.zero;
+        rearBody.maxAngularVelocity = originalMaxAngularVelocity;
+
+        groundJumpPending = false;
+        jumpRequested = false;
+        jumpFromFrontRequested = false;
+        jumpDirectionInput = 0f;
+        attractionActive = false;
+        airborne = true;
+        standingOnFront = false;
+        pauseFollowDuringJump = false;
+        stackedJumpSpinInProgress = false;
+        airTime = 0f;
+        TeleportFoot(left, normal);
+        TeleportFoot(right, normal);
+        return true;
+    }
+
+    private void TeleportFoot(FootState foot, Vector3 normal)
+    {
+        Vector3 position = transform.TransformPoint(foot.restLocalPosition) + normal * 0.2f;
+        foot.body.position = position;
+        foot.body.rotation = rearBody.rotation;
+        foot.plantedSupport = null;
+        foot.swingStart = position;
+        foot.swingStartRotation = rearBody.rotation;
+        foot.plantedNormal = normal;
+        foot.swinging = true;
+    }
+
+    private void ApplyOverstretchRecovery()
+    {
+        // The rendered spring uses these same two body centers as endpoints.
+        float springLength = Vector3.Distance(frontBody.position, rearBody.position);
+        float threshold = Mathf.Max(0f, maxSpringLength);
+        if (springLength <= threshold || maxOverstretchAcceleration <= 0f)
+            return;
+
+        Vector3 towardFront = frontBody.position - rearBody.position;
+        towardFront.x = 0f;
+        if (towardFront.sqrMagnitude < 0.0001f)
+            return;
+
+        Vector3 direction = towardFront.normalized;
+        float closingSpeed = Vector3.Dot(rearBody.linearVelocity - frontBody.linearVelocity,
+                                         direction);
+        float acceleration = Mathf.Clamp(
+            (springLength - threshold) * overstretchSpring -
+            closingSpeed * overstretchDamping,
+            0f, maxOverstretchAcceleration);
+        rearBody.AddForce(direction * acceleration, ForceMode.Acceleration);
+    }
+
+    private void UpdateInsideBlackHole()
+    {
+        groundJumpPending = false;
+        jumpRequested = false;
+        jumpFromFrontRequested = false;
+        jumpDirectionInput = 0f;
+        attractionActive = false;
+        airborne = true;
+        airTime = 0f;
+        standingOnFront = false;
+        pauseFollowDuringJump = false;
+        stackedJumpSpinInProgress = false;
+        rearBody.maxAngularVelocity = originalMaxAngularVelocity;
+
+        blackHoleZone.ApplyAttraction(rearBody);
+
+        // Keep the rear half with the front when a charge carries it away.
+        Vector3 towardFront = frontBody.position - rearBody.position;
+        towardFront.x = 0f;
+        float distance = towardFront.magnitude;
+        if (distance > defaultBodyDistance)
+        {
+            Vector3 direction = towardFront / distance;
+            Vector3 relativeVelocity = frontBody.linearVelocity - rearBody.linearVelocity;
+            relativeVelocity.x = 0f;
+            float acceleration = Mathf.Clamp(
+                (distance - defaultBodyDistance) * positionGain +
+                Vector3.Dot(relativeVelocity, direction) * velocityResponse,
+                0f, maxAcceleration);
+            rearBody.AddForce(direction * acceleration, ForceMode.Acceleration);
+        }
+
+        Vector3 normal = gravityField.OutwardNormal(rearBody.position);
+        Vector3 paddleOffset = blackHoleZone.GetPaddleOffset(frontController.BlackHoleInputDirection);
+        MoveAirborneFoot(left, normal, -paddleOffset);
+        MoveAirborneFoot(right, normal, -paddleOffset);
     }
 
     private bool FootOnFront(FootState foot)
@@ -679,7 +801,12 @@ public sealed class BodyBehindFollower : MonoBehaviour
 
     private void MoveAirborneFoot(FootState foot, Vector3 normal)
     {
-        Vector3 position = transform.TransformPoint(foot.restLocalPosition) + normal * 0.2f;
+        MoveAirborneFoot(foot, normal, Vector3.zero);
+    }
+
+    private void MoveAirborneFoot(FootState foot, Vector3 normal, Vector3 offset)
+    {
+        Vector3 position = transform.TransformPoint(foot.restLocalPosition) + normal * 0.2f + offset;
         foot.body.MovePosition(position);
         foot.body.MoveRotation(rearBody.rotation);
         foot.swingStart = position;
