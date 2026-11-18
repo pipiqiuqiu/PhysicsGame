@@ -193,6 +193,7 @@ public sealed class FrontBodyPhysics : MonoBehaviour
             (keyboard.sKey.isPressed ? 1 : 0);
         if (keyboard != null && keyboard.spaceKey.wasPressedThisFrame)
         {
+            SoundSystem.Instance?.PlaySpacePress();
             jumpRequested = true;
             jumpFromRearRequested = supportedByRear || standingOnRear;
             jumpTravelInput = movementInput;

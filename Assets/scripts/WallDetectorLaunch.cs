@@ -81,6 +81,7 @@ public sealed class WallDetectorLaunch : MonoBehaviour
         float appliedImpulse = Mathf.Min(launchImpulse, availableImpulse);
         if (appliedImpulse > 0f)
             frontBody.AddForce(launchDirection * appliedImpulse, ForceMode.Impulse);
+        SoundSystem.Instance?.PlayChargeLaunch();
         return true;
     }
 

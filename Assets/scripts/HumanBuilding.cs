@@ -79,6 +79,7 @@ public sealed class HumanBuilding : MonoBehaviour
                 fragmentCreationCharges.Remove(piece);
                 // Keep the fragment visible and physical until the delay expires.
                 Destroy(piece.gameObject, fragmentDestroyDelay);
+                SoundSystem.Instance?.PlayFragmentDestroy();
             }
             return;
         }
@@ -90,6 +91,8 @@ public sealed class HumanBuilding : MonoBehaviour
         bool hasPreviousHit = recentHits.TryGetValue(piece, out ChargeHit previousHit);
         if (hasPreviousHit && previousHit.chargeId == chargeId)
             return;
+
+        SoundSystem.Instance?.PlayChargeImpact();
 
         // A configured black hole trigger breaks on the first charge. Ordinary
         // stones still need two distinct charges within the time window.
@@ -226,7 +229,10 @@ public sealed class HumanBuilding : MonoBehaviour
             hole.transform.localScale = blackHoleTemplate.transform.localScale *
                                         Mathf.Max(0.01f, blackHoleSize);
             blackHoleSpawned = true;
+            SoundSystem.Instance?.PlayBlackHoleShatter();
         }
+        else
+            SoundSystem.Instance?.PlayStoneShatter();
 
         for (int i = 0; i < fragments.Count; i++)
         {

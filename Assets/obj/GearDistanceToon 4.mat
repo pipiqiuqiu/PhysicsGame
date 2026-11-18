@@ -9,7 +9,7 @@ Material:
   m_PrefabAsset: {fileID: 0}
   m_Name: GearDistanceToon 4
   m_Shader: {fileID: 4800000, guid: b543b835933549cca9846f438a3b7dca, type: 3}
-  m_Parent: {fileID: 0}
+  m_Parent: {fileID: 2100000, guid: 5bb3f46b09343a9428bb25a8fc40ba5e, type: 2}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords: []
   m_InvalidKeywords: []
@@ -25,11 +25,8 @@ Material:
     m_TexEnvs: []
     m_Ints: []
     m_Floats:
-    - _DistanceEnd: 1000
     - _DistanceStart: 0
-    - _DistanceStrength: 0.642
     - _LightFeather: 0.391
-    - _LightThreshold: 0.242
     m_Colors:
     - _BaseColor: {r: 0.11764707, g: 0.14509805, b: 0.21568629, a: 1}
     - _DistanceColor: {r: 0.3584905, g: 0.4270254, b: 0.7169812, a: 1}
